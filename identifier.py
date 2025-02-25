@@ -7,14 +7,17 @@ st.title("Property Identifier Tool")
 st.subheader("Instructions:")
 st.markdown(
     """
-1. **Input a valid (correctly formatted) Parcel ID**  
-   - For example: 12-345.6789 or 123-45.67-890
+1. **Input multiple valid (correctly formatted) Parcel IDs** (one example at a time)  
+   - Click "**Add Example Format**" each time. For example, you might add:
+       - 12-345.6789
+       - 123-45.67-890
+   - Each example will be stored as a valid format for this county.
 
 2. **Upload your file**  
    - Choose a CSV file containing the Parcel IDs you want to reformat.
 
 3. **Select the column containing Parcel IDs**  
-   - The script will take those Parcel IDs, strip out everything except digits, then re-insert dashes and periods using your example pattern.
+   - The script will take those Parcel IDs, strip out everything except digits, then try **each** known format to see if it can be reformatted correctly.
 
 4. **Click Submit to Reformat**  
    - After selecting the column, click the button to run the transformation.
@@ -23,17 +26,19 @@ st.markdown(
    - After the Parcel IDs are reformatted, download the CSV and use it in your scripts.
    
 6. **Test the reformatted Parcel IDs in scraping scripts or other tools.** 
-    - [TaxProper Recorder](https://recorder.taxproper.com)
-    - [BrowseAi](https://browse.ai)
+   - [TaxProper Recorder](https://recorder.taxproper.com)
+   - [BrowseAi](https://browse.ai)
 
 **Important Notes**:  
-   - The script will return "Unable to reformat" if the final string does not match the input example's length.
-   - It is possible that counties have multiple character lengths for Parcel IDs. This script assumes a consistent length. Retry with other examples if needed.
+   - The script returns "**Unable to reformat**" if none of your provided formats match the row’s Parcel ID.
+   - Some counties have multiple lengths/formats for Parcel IDs. Enter **all** relevant examples (one at a time).
+   - The script will use the **first** format that matches each Parcel ID.  
+   - If you want separate digit segments (Part_1, Part_2, etc.), the script will figure out which format was used for that row and split accordingly.
 """
 )
 
 # -----------------------------------------------------------------------------
-# 1. Parse the format from the example parcel: find digits and positions of '-' or '.'
+# 1. Parse the format from a single example Parcel
 # -----------------------------------------------------------------------------
 def parse_parcel_format(parcel_str):
     """
@@ -41,11 +46,8 @@ def parse_parcel_format(parcel_str):
       1) A string of all digits (stripped from any separators)
       2) A list of (position, character) where character is '-' or '.' 
          and position is the index among the digits.
-    
-    Example:
-       Input: "12.34-567"
-       Digits extracted: "1234567"
-       insertion_points: [(2, '.'), (4, '-')]
+      3) The total length (including digits and separators) 
+         of the final, properly formatted parcel string.
     """
     digits_only = re.sub(r"\D", "", parcel_str)
     digit_count_so_far = 0
@@ -56,13 +58,14 @@ def parse_parcel_format(parcel_str):
             digit_count_so_far += 1
         else:
             if char in ['-', '.']:
-                # Record the index position among digits and the special char
                 insertion_points.append((digit_count_so_far, char))
-    return digits_only, insertion_points
+
+    target_length = len(parcel_str.strip())  # length of the example (digits + separators)
+    return digits_only, insertion_points, target_length
 
 
 # -----------------------------------------------------------------------------
-# 2. Insert dashes/periods into a new string of digits based on the insertion points
+# 2. Insert dashes/periods into a string of digits based on insertion points
 # -----------------------------------------------------------------------------
 def format_parcel_id(digits_str, insertion_points):
     """
@@ -70,29 +73,31 @@ def format_parcel_id(digits_str, insertion_points):
     in the digits string.
     """
     output = digits_str
-
-    # Insert from right to left so we don't mess up indices after insertion
+    # Insert from right to left so we don't disrupt subsequent indices
     for pos, char in reversed(insertion_points):
         if pos <= len(output):
             output = output[:pos] + char + output[pos:]
         else:
-            output = output + char
-
+            output += char
     return output
 
 
 # -----------------------------------------------------------------------------
-# 3. Helper to apply the discovered pattern and enforce length-check
+# 3. Attempt a single format
 # -----------------------------------------------------------------------------
-def detect_and_format_parcel(parcel_id, insertion_points, target_length):
+def attempt_format(parcel_id, fmt):
     """
-    1) Strip non-digits.
-    2) Insert dashes/periods.
-    3) Enforce final string length.
+    1) Strip non-digits
+    2) Insert dashes/periods
+    3) Enforce final string length
     """
     digits_str = re.sub(r"\D", "", parcel_id)
     if not digits_str:
-        return None  # No digits at all
+        return "Unable to reformat"
+
+    insertion_points = fmt["insertion_points"]
+    target_length = fmt["target_length"]
+
     final_str = format_parcel_id(digits_str, insertion_points)
     if len(final_str) != target_length:
         return "Unable to reformat"
@@ -100,75 +105,119 @@ def detect_and_format_parcel(parcel_id, insertion_points, target_length):
 
 
 # -----------------------------------------------------------------------------
-# 4. Break the final reformatted string into digit-only parts based on insertion points
+# 4. Try multiple formats; return first that works
 # -----------------------------------------------------------------------------
-def get_parts(reformatted_str, insertion_points):
+def detect_and_format_multi(parcel_id, all_formats):
     """
-    1) If the parcel is "Unable to reformat", return an empty list.
-    2) Otherwise, remove non-digit characters and slice into segments
-       using the insertion points from the example Parcel ID.
+    Go through each known format in 'all_formats'.
+    Return the first that produces a valid final length.
+    If none fit, return "Unable to reformat".
     """
-    if reformatted_str in [None, "Unable to reformat"]:
-        return []
-    # Remove dashes/periods (or any non-digits)
-    digits_str = re.sub(r"\D", "", reformatted_str)
+    for f in all_formats:
+        candidate = attempt_format(parcel_id, f)
+        if candidate != "Unable to reformat":
+            return candidate
+    return "Unable to reformat"
 
-    parts = []
-    start = 0
-    for pos, _char in insertion_points:
-        parts.append(digits_str[start:pos])
-        start = pos
-    # Append the remaining segment
-    parts.append(digits_str[start:])
-    return parts
+
+# -----------------------------------------------------------------------------
+# 5. Determine which format actually worked, then split into parts
+# -----------------------------------------------------------------------------
+def get_parts_for_multi(original_val, all_formats):
+    """
+    1) For the given 'original_val', figure out which format actually works 
+       (the first that yields a valid reformat).
+    2) Use that format's insertion_points to split the digits.
+    3) Return a list of digit segments (['12', '345', '6789', etc.]) 
+       or [] if no format matches.
+    """
+    for f in all_formats:
+        candidate = attempt_format(original_val, f)
+        if candidate != "Unable to reformat":
+            # We found the correct format; now extract parts
+            digits_str = re.sub(r"\D", "", candidate)
+            insertion_points = f["insertion_points"]
+
+            parts = []
+            start = 0
+            for pos, _char in insertion_points:
+                parts.append(digits_str[start:pos])
+                start = pos
+            # Remainder
+            parts.append(digits_str[start:])
+            return parts
+    # If none matched
+    return []
 
 
 # -----------------------------------------------------------------------------
 # Streamlit UI
 # -----------------------------------------------------------------------------
 
-# Step 1: Input a "correctly formatted" Parcel ID
-example_parcel = st.text_input("Enter a valid, correctly formatted Parcel ID (e.g., 12-345.6789)")
+# We'll store all valid formats in session_state so the user can add multiple
+if "all_formats" not in st.session_state:
+    st.session_state.all_formats = []
+
+st.subheader("Add Multiple Parcel ID Formats")
+with st.form(key="example_form", clear_on_submit=True):
+    example_parcel = st.text_input("Enter a valid example Parcel ID (e.g., 12-345.6789)")
+    add_btn = st.form_submit_button("Add Example Format")
+
+    if add_btn and example_parcel.strip():
+        base_digits, insertion_points, target_length = parse_parcel_format(example_parcel)
+        # Store it as a dict
+        st.session_state.all_formats.append({
+            "insertion_points": insertion_points,
+            "target_length": target_length
+        })
+        st.success(f"Added new format: {example_parcel}")
+
+# Display the currently known formats
+if st.session_state.all_formats:
+    st.markdown("**Current Known Formats:**")
+    for i, fdata in enumerate(st.session_state.all_formats, start=1):
+        st.write(
+            f"- Format {i}: insertion_points={fdata['insertion_points']}, "
+            f"target_length={fdata['target_length']}"
+        )
+else:
+    st.info("No formats added yet. Please enter at least one example above.")
+
+st.markdown("---")
 
 # Step 2: Upload a CSV file
 uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
 
-# Only proceed if we have both an example Parcel and a file
-if example_parcel and uploaded_file:
-    # Read the file
+# Only proceed if at least one format is known & user uploaded a file
+if st.session_state.all_formats and uploaded_file:
+    # Read the CSV file
     df = pd.read_csv(uploaded_file)
     st.write("Preview of the uploaded file:")
     st.write(df.head())
 
-    # Let the user select which column contains Parcel IDs
+    # Let the user select which column has Parcel IDs
     columns = df.columns.tolist()
     header_column = st.selectbox("Select the column that contains Parcel IDs", columns)
 
-    # Add a button to explicitly trigger the reformatting
-    if st.button("Submit"):
-        # Parse the example to get digits & insertion points
-        base_digits, insertion_points = parse_parcel_format(example_parcel)
-        target_length = len(example_parcel.strip())  # We assume the example's length is the standard
-
-        # Apply the detected pattern to the selected column
+    # Button to reformat
+    if st.button("Submit to Reformat"):
+        # Create a new column with the reformatted ID
         df["Reformatted_Parcel_ID"] = df[header_column].astype(str).apply(
-            lambda x: detect_and_format_parcel(x, insertion_points, target_length)
+            lambda x: detect_and_format_multi(x, st.session_state.all_formats)
         )
 
-        # Create new columns for each digit-only part using insertion points
-        df_parts = df["Reformatted_Parcel_ID"].apply(lambda x: get_parts(x, insertion_points))
+        # Create separate Part_X columns
+        df_parts = df[header_column].astype(str).apply(
+            lambda x: get_parts_for_multi(x, st.session_state.all_formats)
+        )
         max_parts = df_parts.apply(len).max()
-
-        # Dynamically create new columns for each part
         for i in range(max_parts):
-            df[f"Part_{i+1}"] = df_parts.apply(
-                lambda x: x[i] if i < len(x) else ""
-            )
+            df[f"Part_{i+1}"] = df_parts.apply(lambda p: p[i] if len(p) > i else "")
 
         st.write("Reformatted Parcel IDs (with parts in separate columns):")
-        st.write(df.head())  # Display only head as a preview
+        st.write(df.head())  # Show a preview
 
-        # Provide a download link for the updated file
+        # Provide a download link
         csv_data = df.to_csv(index=False)
         st.download_button(
             label="Download Reformatted CSV",
@@ -177,15 +226,13 @@ if example_parcel and uploaded_file:
             mime="text/csv"
         )
     else:
-        st.write("Select your column above and then click **Submit** to reformat the Parcel IDs.")
-elif example_parcel:
-    # If there's an example parcel but no file, prompt user to upload
-    st.info("Please upload a CSV file to continue.")
+        st.write("Select your column above and then click **Submit to Reformat**.")
 elif uploaded_file:
-    # If there's a file but no example parcel, prompt user for example
-    st.info("Please enter a valid example Parcel ID to continue.")
+    st.info("Please add at least one valid Parcel ID example (above) before reformatting.")
+elif st.session_state.all_formats:
+    st.info("Please upload a CSV file to continue.")
 else:
-    # Neither file nor example provided
-    st.info("Enter an example Parcel ID and upload a CSV to begin.")
+    st.info("Add an example format and upload a CSV to begin.")
+
 
 
