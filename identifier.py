@@ -8,7 +8,7 @@ st.subheader("Instructions:")
 st.markdown(
     """
 1. **Input a valid (correctly formatted) Parcel ID**  
-   - For example: `12-345.6789` or `123-45.67-890`
+   - For example: 12-345.6789 or 123-45.67-890
 
 2. **Upload your file**  
    - Choose a CSV file containing the Parcel IDs you want to reformat.
@@ -39,8 +39,8 @@ def parse_parcel_format(parcel_str):
     """
     Given an example Parcel ID with digits, dashes, and/or periods, return:
       1) A string of all digits (stripped from any separators)
-      2) A list of (position, character) where `character` is '-' or '.' 
-         and `position` is the index among the digits.
+      2) A list of (position, character) where character is '-' or '.' 
+         and position is the index among the digits.
     
     Example:
        Input: "12.34-567"
@@ -56,6 +56,7 @@ def parse_parcel_format(parcel_str):
             digit_count_so_far += 1
         else:
             if char in ['-', '.']:
+                # Record the index position among digits and the special char
                 insertion_points.append((digit_count_so_far, char))
     return digits_only, insertion_points
 
@@ -99,6 +100,30 @@ def detect_and_format_parcel(parcel_id, insertion_points, target_length):
 
 
 # -----------------------------------------------------------------------------
+# 4. Break the final reformatted string into digit-only parts based on insertion points
+# -----------------------------------------------------------------------------
+def get_parts(reformatted_str, insertion_points):
+    """
+    1) If the parcel is "Unable to reformat", return an empty list.
+    2) Otherwise, remove non-digit characters and slice into segments
+       using the insertion points from the example Parcel ID.
+    """
+    if reformatted_str in [None, "Unable to reformat"]:
+        return []
+    # Remove dashes/periods (or any non-digits)
+    digits_str = re.sub(r"\D", "", reformatted_str)
+
+    parts = []
+    start = 0
+    for pos, _char in insertion_points:
+        parts.append(digits_str[start:pos])
+        start = pos
+    # Append the remaining segment
+    parts.append(digits_str[start:])
+    return parts
+
+
+# -----------------------------------------------------------------------------
 # Streamlit UI
 # -----------------------------------------------------------------------------
 
@@ -123,23 +148,32 @@ if example_parcel and uploaded_file:
     if st.button("Submit"):
         # Parse the example to get digits & insertion points
         base_digits, insertion_points = parse_parcel_format(example_parcel)
-        target_length = len(example_parcel.strip())  # we assume the example's length is the standard
+        target_length = len(example_parcel.strip())  # We assume the example's length is the standard
 
-        # Apply the detected pattern to the selected column in the DataFrame
+        # Apply the detected pattern to the selected column
         df["Reformatted_Parcel_ID"] = df[header_column].astype(str).apply(
             lambda x: detect_and_format_parcel(x, insertion_points, target_length)
         )
-        
 
-        st.write("Reformatted Parcel IDs (preview):")
-        st.write(df[["Reformatted_Parcel_ID"]].head())
+        # Create new columns for each digit-only part using insertion points
+        df_parts = df["Reformatted_Parcel_ID"].apply(lambda x: get_parts(x, insertion_points))
+        max_parts = df_parts.apply(len).max()
 
-        # Provide a download link for the reformatted file
+        # Dynamically create new columns for each part
+        for i in range(max_parts):
+            df[f"Part_{i+1}"] = df_parts.apply(
+                lambda x: x[i] if i < len(x) else ""
+            )
+
+        st.write("Reformatted Parcel IDs (with parts in separate columns):")
+        st.write(df.head())  # Display only head as a preview
+
+        # Provide a download link for the updated file
         csv_data = df.to_csv(index=False)
         st.download_button(
             label="Download Reformatted CSV",
             data=csv_data,
-            file_name="reformatted_parcel_ids.csv",
+            file_name="reformatted_parcel_ids_with_parts.csv",
             mime="text/csv"
         )
     else:
