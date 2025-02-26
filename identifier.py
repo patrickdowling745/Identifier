@@ -62,7 +62,7 @@ def parse_parcel_format(parcel_str):
             char_count_so_far += 1
         else:
             # If it's a dash or period, record an insertion point
-            if char in ['-', '.']:
+            if char in ['-', '.', ' ']:
                 insertion_points.append((char_count_so_far, char))
 
     target_length = len(parcel_str.strip())  # length of the example (alphanumeric + separators)
